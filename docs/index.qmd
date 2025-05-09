@@ -224,7 +224,6 @@ ggplot() +
 ```
 
 ```{r}
-# For each state pick the city in the zone with max population
 top_state_zone <- in_zone %>%
   group_by(state_name) %>%
   slice_max(population, n = 1) %>%
