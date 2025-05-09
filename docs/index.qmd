@@ -1,7 +1,247 @@
 ---
-title: "Lab 10"
+title: "Lab 10: Distances and the Border Zone"
+subtitle: "Ecosystem Science and Sustainability 330"
+author:
+  - name: Noah Goodhart
+    email: noahwg@rams.colostate.edu
 format: html
-editor: visual
 ---
 
-Test
+
+
+
+# Setup
+
+```{r setup}
+# Spatial data
+library(tidyverse)
+library(sf)
+library(units)
+library(AOI)
+
+# Visualization & tables
+library(gghighlight)
+library(ggrepel)
+library(knitr)
+library(flextable)
+
+# Make units display nicely
+options(knitr.kable.NA = '')
+```
+
+```{r}
+remotes::install_github("mikejohnson51/AOI")
+```
+
+
+```{r}
+eqdc <- "+proj=eqdc +lat_0=40 +lon_0=-96 +lat_1=20 +lat_2=60 \
++x_0=0 +y_0=0 +datum=NAD83 +units=m +no_defs"
+```
+
+
+```{r}
+states_conus <- aoi_get(state = 'conus') %>%
+  st_transform(eqdc)
+```
+
+```{r}
+countries <- aoi_get(country = c("USA","MX","CA")) %>%
+  st_transform(eqdc)
+```
+
+```{r}
+library(here)
+cities_raw <- read_csv( here("data","uscities.csv") )
+
+cities <- cities_raw %>%
+  st_as_sf(coords = c("lng","lat"), crs = 4326) %>%
+  st_transform(eqdc)
+
+```
+```{r}
+# 2.1 National border (all states unified, cast to lines)
+border_national <- states_conus %>%
+  st_union() %>%
+  st_cast("MULTILINESTRING")
+
+# 2.2 State boundaries preserved
+border_states <- states_conus %>%
+  st_cast("MULTILINESTRING")
+
+# 2.3 & 2.4 Mexico and Canada borders
+mex_border <- countries %>%
+  filter(sovereignt == "Mexico") %>%
+  st_union() %>%
+  st_cast("MULTILINESTRING")
+
+can_border <- countries %>%
+  filter(sovereignt == "Canada") %>%
+  st_union() %>%
+  st_cast("MULTILINESTRING")
+
+# Compute distances (in km)
+cities <- cities %>%
+  mutate(
+    dist_national = as.numeric(st_distance(geometry, border_national)) / 1000,
+    dist_state    = apply(st_distance(., border_states), 1, min) / 1000,
+    dist_mexico   = as.numeric(st_distance(geometry, mex_border))   / 1000,
+    dist_canada   = as.numeric(st_distance(geometry, can_border))   / 1000
+  )
+
+```
+
+```{r}
+# Helper to build and print a flextable
+print_top5 <- function(df, dist_col, label){
+  df %>%
+    arrange(desc(.data[[dist_col]])) %>%
+    slice_head(n = 5) %>%
+    select(city, state_name, all_of(dist_col)) %>%
+    rename(
+      State    = state_name,
+      Distance = !!sym(dist_col)
+    ) %>%
+    flextable() %>%
+    set_caption(label) %>%
+    print()
+}
+
+# now call it
+print_top5(cities, "dist_national", "Top 5 Cities by Distance to National Border (km)")
+print_top5(cities, "dist_state",    "Top 5 Cities by Distance to Nearest State Border (km)")
+print_top5(cities, "dist_mexico",   "Top 5 Cities by Distance to Mexico Border (km)")
+print_top5(cities, "dist_canada",   "Top 5 Cities by Distance to Canada Border (km)")
+```
+
+```{r}
+# Top 10 US cities by population
+top10_cities <- cities %>%
+  arrange(desc(population)) %>%
+  slice(1:10)
+
+ggplot() +
+  geom_sf(data = countries, fill = "grey95", color = "white") +
+  geom_sf(data = states_conus, fill = NA, color = "black", size = 0.4) +
+  geom_sf(data = top10_cities, aes(size = population), color = "red") +
+  ggrepel::geom_label_repel(
+    data = top10_cities,
+    aes(label = city, geometry = geometry),
+    stat = "sf_coordinates",
+    size = 3
+  ) +
+  scale_size(range = c(2, 6)) +
+  labs(size = "Population", title = "Top 10 US Cities on CONUS Map") +
+  theme_minimal()
+
+```
+
+```{r}
+ggplot() +
+  geom_sf(data = states_conus, fill = "grey90", color = "white") +
+  geom_sf(data = cities, aes(color = dist_national), size = 1) +
+  ggrepel::geom_label_repel(
+    data = cities %>% arrange(desc(dist_national)) %>% slice(1:5),
+    aes(label = city, geometry = geometry),
+    stat = "sf_coordinates",
+    size = 3
+  ) +
+  scale_color_viridis_c(name = "km") +
+  labs(title = "US Cities by Distance to National Border") +
+  theme_minimal()
+
+```
+
+```{r}
+ggplot() +
+  geom_sf(data = states_conus, fill = "grey90", color = "white") +
+  geom_sf(data = cities, aes(color = dist_state), size = 1) +
+  ggrepel::geom_label_repel(
+    data = cities %>% arrange(desc(dist_state)) %>% slice(1:5),
+    aes(label = city, geometry = geometry),
+    stat = "sf_coordinates",
+    size = 3
+  ) +
+  scale_color_viridis_c(name = "km") +
+  labs(title = "US Cities by Distance to Nearest State Border") +
+  theme_minimal()
+
+```
+
+```{r}
+cities_eq <- cities %>%
+  mutate(diff_mx_ca = abs(dist_mexico - dist_canada))
+
+ggplot(data = cities_eq) +
+  # base map
+  geom_sf(data = states_conus, fill = "grey90", color = "white") +
+  # all cities, colored by diff
+  geom_sf(aes(color = diff_mx_ca), size = 1) +
+  # highlight only those within ±100 km
+  gghighlight(
+    diff_mx_ca <= 100,
+    label_key            = city,
+    unhighlighted_params = list(alpha = 0.2)
+  ) +
+  scale_color_viridis_c(name = "|dist_MX – dist_CA| (km)") +
+  labs(
+    title = "Cities Equidistant (±100 km) to MX & CA Borders"
+  ) +
+  theme_minimal()
+```
+```{r}
+# 100 miles ≈ 160 km
+zone_km <- 160
+
+in_zone <- cities %>% filter(dist_national <= zone_km)
+
+# Summary table
+zone_summary <- tibble(
+  Metric = c("Number of cities", "Population in zone", "% of total population"),
+  Value = c(
+    nrow(in_zone),
+    sum(in_zone$population, na.rm = TRUE),
+    sum(in_zone$population, na.rm = TRUE) / sum(cities$population, na.rm = TRUE) * 100
+  )
+)
+
+knitr::kable(zone_summary, caption = "100-Mile Border Zone Summary")
+
+```
+```{r}
+ggplot() +
+  geom_sf(data = states_conus, fill = "grey90", color = "white") +
+  geom_sf(data = in_zone, aes(color = dist_national), size = 1) +
+  scale_color_gradient(low = "orange", high = "darkred", name = "km") +
+  ggrepel::geom_label_repel(
+    data = in_zone %>% arrange(desc(population)) %>% slice(1:10),
+    aes(label = city, geometry = geometry),
+    stat = "sf_coordinates", size = 3
+  ) +
+  labs(title = "Cities within 100 miles of National Border") +
+  theme_minimal()
+
+```
+
+```{r}
+# For each state pick the city in the zone with max population
+top_state_zone <- in_zone %>%
+  group_by(state_name) %>%
+  slice_max(population, n = 1) %>%
+  ungroup()
+
+ggplot() +
+  geom_sf(data = states_conus, fill = "grey90", color = "white") +
+  geom_sf(data = in_zone, alpha = 0.2, color = "grey40", size = 0.5) +
+  geom_sf(data = top_state_zone, aes(size = population), color = "purple") +
+  ggrepel::geom_label_repel(
+    data = top_state_zone,
+    aes(label = city, geometry = geometry),
+    stat = "sf_coordinates", size = 3
+  ) +
+  labs(size = "Population",
+       title = "Most Populous City per State within 100 mile Zone") +
+  theme_minimal()
+
+```
+
